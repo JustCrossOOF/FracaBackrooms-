@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Backrooms</title>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000;
+-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;touch-action:none}
+canvas{display:block;width:100%;height:100%;image-rendering:-moz-crisp-edges;image-rendering:-webkit-optimize-contrast;image-rendering:pixelated;-ms-interpolation-mode:nearest-neighbor}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(function () {
+'use strict';
+
+/* ---------- Mapa infinito determinista (mismo resultado en cualquier cliente) ---------- */
+var T = 16;      // tamaño de tile en px lógicos
+var HALF = 4;    // semi-tamaño de la caja de colisión
+var SPEED = 64;  // px/s
+
+function hash(a, b) {
+  var n = (a * 73856093) ^ (b * 19349663);
+  n = ((n ^ (n >>> 15)) * 2654435) | 0;
+  n = n ^ (n >>> 13);
+  return n >>> 0;
+}
+
+// Bloques de 8x8 tiles. Los bordes son muros con puerta (o abiertos); la cruz central siempre está libre.
+function door(r, m) {
+  if (r === 0) return false;                       // borde abierto
+  if (r < 3) return !(m === 3 || m === 4);         // puerta estrecha
+  return !(m >= 2 && m <= 5);                      // puerta ancha
+}
+function wall(tx, ty) {
+  var mx = tx & 7, my = ty & 7, bx = tx >> 3, by = ty >> 3;
+  if (mx === 0) { if (my === 0) return true; return door(hash(bx, by) % 5, my); }
+  if (my === 0) return door(hash(bx + 977, by) % 5, mx);
+  if (mx >= 2 && mx <= 6 && my >= 2 && my <= 6 && mx !== 3 && mx !== 4 && my !== 3 && my !== 4) {
+    return hash(tx, ty) % 4 === 0;                 // pilares sueltos
+  }
+  return false;
+}
+function hit(x, y) {
+  return wall(Math.floor((x - HALF) / T), Math.floor((y - HALF) / T)) ||
+         wall(Math.floor((x + HALF) / T), Math.floor((y - HALF) / T)) ||
+         wall(Math.floor((x - HALF) / T), Math.floor((y + HALF) / T)) ||
+         wall(Math.floor((x + HALF) / T), Math.floor((y + HALF) / T));
+}
+
+/* ---------- Estado ---------- */
+var cv = document.getElementById('c');
+var ctx = cv.getContext('2d');
+var W = 160, H = 144, S = 3;
+var vignette = null;
+var me = { x: 64, y: 64, c: 0, fx: 0, fy: 1 };
+var myId = 0, spawned = false, colors = ['#e63946'];
+var others = {}, nOthers = 0;
+var input = { active: false, x: 0, y: 0, k: { l: 0, r: 0, u: 0, d: 0 } };
+var hint = 6; // segundos que se muestra la ayuda
+
+function resize() {
+  var iw = window.innerWidth, ih = window.innerHeight;
+  S = Math.max(2, Math.round(Math.min(iw, ih) / 150));
+  W = Math.ceil(iw / S); H = Math.ceil(ih / S);
+  cv.width = W; cv.height = H;
+  // viñeta pre-renderizada: una sola drawImage por frame
+  vignette = document.createElement('canvas');
+  vignette.width = W; vignette.height = H;
+  var g = vignette.getContext('2d');
+  var r = Math.sqrt(W * W + H * H) / 2;
+  var gr = g.createRadialGradient(W / 2, H / 2, r * 0.1, W / 2, H / 2, r * 0.72);
+  gr.addColorStop(0, 'rgba(12,9,0,0)');
+  gr.addColorStop(1, 'rgba(12,9,0,0.92)');
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+}
+window.addEventListener('resize', resize, false);
+window.addEventListener('orientationchange', function () { setTimeout(resize, 200); }, false);
+resize();
+
+/* ---------- Controles: tocar/arrastrar = ir hacia ese punto; WASD/flechas en escritorio ---------- */
+function setPt(x, y) { input.active = true; input.x = x; input.y = y; hint = 0; }
+cv.addEventListener('touchstart', function (e) { e.preventDefault(); var t = e.touches[0]; setPt(t.clientX, t.clientY); }, false);
+cv.addEventListener('touchmove', function (e) { e.preventDefault(); var t = e.touches[0]; setPt(t.clientX, t.clientY); }, false);
+cv.addEventListener('touchend', function (e) { e.preventDefault(); if (!e.touches.length) input.active = false; }, false);
+cv.addEventListener('touchcancel', function () { input.active = false; }, false);
+cv.addEventListener('mousedown', function (e) { setPt(e.clientX, e.clientY); }, false);
+window.addEventListener('mousemove', function (e) { if (input.active) setPt(e.clientX, e.clientY); }, false);
+window.addEventListener('mouseup', function () { input.active = false; }, false);
+function key(e, v) {
+  var k = e.keyCode, K = input.k;
+  if (k === 37 || k === 65) K.l = v; else if (k === 39 || k === 68) K.r = v;
+  else if (k === 38 || k === 87) K.u = v; else if (k === 40 || k === 83) K.d = v; else return;
+  hint = 0; e.preventDefault();
+}
+window.addEventListener('keydown', function (e) { key(e, 1); }, false);
+window.addEventListener('keyup', function (e) { key(e, 0); }, false);
+document.addEventListener('gesturestart', function (e) { e.preventDefault(); }, false);
+
+/* ---------- Red ---------- */
+var sock = null;
+function addOther(id, x, y, c) {
+  if (id === myId) return;
+  if (!others[id]) nOthers++;
+  others[id] = { x: x, y: y, dx: x, dy: y, c: c };
+}
+if (typeof io !== 'undefined') {
+  sock = io({ transports: ['websocket', 'polling'], reconnectionDelay: 500, reconnectionDelayMax: 3000 });
+  sock.on('init', function (d) {
+    myId = d.id; colors = d.colors; others = {}; nOthers = 0;
+    for (var i = 0; i < d.list.length; i += 4) {
+      if (d.list[i] === myId) {
+        me.c = d.list[i + 3];
+        if (!spawned) { me.x = d.list[i + 1]; me.y = d.list[i + 2]; spawned = true; }
+      } else addOther(d.list[i], d.list[i + 1], d.list[i + 2], d.list[i + 3]);
+    }
+  });
+  sock.on('j', function (d) { addOther(d[0], d[1], d[2], d[3]); });
+  sock.on('l', function (id) { if (others[id]) { delete others[id]; nOthers--; } });
+  sock.on('p', function (a) {
+    for (var i = 0; i < a.length; i += 3) {
+      var o = others[a[i]];
+      if (o) { o.x = a[i + 1]; o.y = a[i + 2]; }
+    }
+  });
+  sock.on('fix', function (p) { me.x = p[0]; me.y = p[1]; });
+  var lx = 0, ly = 0;
+  setInterval(function () {
+    var x = Math.round(me.x), y = Math.round(me.y);
+    if (sock.connected && myId && (x !== lx || y !== ly)) { lx = x; ly = y; sock.emit('m', [x, y]); }
+  }, 100);
+}
+
+/* ---------- Lógica ---------- */
+function update(dt) {
+  var vx = 0, vy = 0, K = input.k;
+  if (input.active) {
+    var dx = input.x - window.innerWidth / 2, dy = input.y - window.innerHeight / 2;
+    var d = Math.sqrt(dx * dx + dy * dy), dead = 10 * S / 3;
+    if (d > dead) { var m = Math.min(1, (d - dead) / (40 * S / 3)); vx = dx / d * m; vy = dy / d * m; }
+  } else {
+    vx = K.r - K.l; vy = K.d - K.u;
+    if (vx && vy) { vx *= 0.7071; vy *= 0.7071; }
+  }
+  if (vx || vy) {
+    var nx = me.x + vx * SPEED * dt, ny = me.y + vy * SPEED * dt;
+    if (!hit(nx, me.y)) me.x = nx;
+    if (!hit(me.x, ny)) me.y = ny;
+    if (Math.abs(vx) > Math.abs(vy)) { me.fx = vx > 0 ? 1 : -1; me.fy = 0; } else { me.fx = 0; me.fy = vy > 0 ? 1 : -1; }
+  }
+  for (var id in others) { var o = others[id]; o.dx += (o.x - o.dx) * 0.25; o.dy += (o.y - o.dy) * 0.25; }
+  if (hint > 0) hint -= dt;
+}
+
+/* ---------- Dibujo ---------- */
+function person(x, y, color, fx, fy, self) {
+  x = Math.round(x); y = Math.round(y);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(x - 5, y + 3, 10, 4);
+  ctx.fillStyle = '#1a1405'; ctx.fillRect(x - 5, y - 6, 10, 11);
+  ctx.fillStyle = color; ctx.fillRect(x - 4, y - 5, 8, 9);
+  ctx.fillStyle = '#fff';
+  if (fx) { ctx.fillRect(x + fx * 2, y - 3, 1, 2); ctx.fillRect(x + fx * 2, y + 1, 1, 2); }
+  else { ctx.fillRect(x - 3, y + fy * 2 - 1, 2, 1); ctx.fillRect(x + 1, y + fy * 2 - 1, 2, 1); }
+  if (self) { ctx.fillStyle = '#fff'; ctx.fillRect(x - 1, y - 9, 2, 2); }
+}
+
+function draw(now) {
+  var cx = Math.round(me.x - W / 2), cy = Math.round(me.y - H / 2);
+  var tx0 = Math.floor(cx / T), ty0 = Math.floor(cy / T);
+  var tx1 = tx0 + Math.ceil(W / T) + 1, ty1 = ty0 + Math.ceil(H / T) + 1;
+  var bad = (Math.floor(now / 90) % 23) === 0;
+  var tx, ty, sx, sy, n;
+  for (ty = ty0; ty <= ty1; ty++) {
+    for (tx = tx0; tx <= tx1; tx++) {
+      sx = tx * T - cx; sy = ty * T - cy;
+      if (wall(tx, ty)) {
+        ctx.fillStyle = '#c9b655'; ctx.fillRect(sx, sy, T, T);
+        ctx.fillStyle = '#b8a548'; ctx.fillRect(sx + 3, sy, 1, T); ctx.fillRect(sx + 11, sy, 1, T); // franjas de papel tapiz
+        if (!wall(tx, ty - 1)) { ctx.fillStyle = '#e3d47c'; ctx.fillRect(sx, sy, T, 1); }
+        if (!wall(tx, ty + 1)) { ctx.fillStyle = '#8f7f35'; ctx.fillRect(sx, sy + T - 6, T, 6); ctx.fillStyle = '#6e6128'; ctx.fillRect(sx, sy + T - 1, T, 1); }
+      } else {
+        var mx = tx & 7, my = ty & 7;
+        var lit = (mx === 3 || mx === 4) && (my === 3 || my === 4) && !(bad && hash(tx >> 3, ty >> 3) % 3 === 0);
+        ctx.fillStyle = lit ? '#b9a965' : '#a8985a'; ctx.fillRect(sx, sy, T, T);
+        n = hash(tx, ty);
+        if ((n & 7) === 0) { ctx.fillStyle = '#968748'; ctx.fillRect(sx + ((n >>> 4) & 7) * 2, sy + ((n >>> 8) & 7) * 2, 2, 1); }
+      }
+    }
+  }
+  for (var id in others) { var o = others[id]; person(o.dx - cx, o.dy - cy, colors[o.c % colors.length], 0, 1, false); }
+  person(me.x - cx, me.y - cy, colors[me.c % colors.length], me.fx, me.fy, true);
+
+  ctx.drawImage(vignette, 0, 0);
+  if ((Math.floor(now / 70) % 41) === 0) { ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fillRect(0, 0, W, H); }
+
+  ctx.font = '8px monospace'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#e3d47c'; ctx.fillText((nOthers + 1) + (nOthers ? ' aquí' : ' aquí (solo/a)'), 3, 3);
+  if (hint > 0) { ctx.textAlign = 'center'; ctx.fillText('toca y arrastra para moverte', W / 2, H - 12); ctx.textAlign = 'left'; }
+}
+
+/* ---------- Bucle ---------- */
+var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame || window.mozRequestAnimationFrame ||
+  function (f) { return setTimeout(f, 33); };
+var last = Date.now();
+function loop() {
+  raf(loop);
+  var now = Date.now(), dt = (now - last) / 1000; last = now;
+  if (!(dt > 0) || dt > 0.05) dt = 0.05;
+  update(dt); draw(now);
+}
+loop();
+})();
+</script>
+</body>
+</html>
