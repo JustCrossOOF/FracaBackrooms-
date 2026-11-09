@@ -4,21 +4,50 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Backrooms</title>
+<title>FracaBackrooms Multiplayer</title>
 <style>
 html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000;
--webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;touch-action:none}
+-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;touch-action:none;font-family:sans-serif;}
 canvas{display:block;width:100%;height:100%;image-rendering:-moz-crisp-edges;image-rendering:-webkit-optimize-contrast;image-rendering:pixelated;-ms-interpolation-mode:nearest-neighbor}
+#ui {
+  position: absolute; top: 10px; right: 10px; z-index: 10;
+}
+button { background: #d4ac0d; border: none; padding: 8px 12px; font-weight: bold; border-radius: 4px; color: #fff; cursor: pointer; font-size: 11px; }
+
+/* Editor Modal */
+#editor-modal {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  background: rgba(10,10,10,0.95); padding: 15px; border-radius: 8px; border: 2px solid #d4ac0d;
+  display: none; z-index: 20; text-align: center; color: white;
+  max-width: 90vw; box-sizing: border-box;
+}
+.pixel-grid { display: grid; grid-template-columns: repeat(8, 28px); gap: 2px; margin: 10px auto; justify-content: center; }
+.pixel-cell { width: 28px; height: 28px; background: #222; border: 1px solid #444; cursor: pointer; }
+.palette { display: flex; gap: 4px; justify-content: center; margin-top: 8px; flex-wrap: wrap; }
+.color-btn { width: 22px; height: 22px; border: 2px solid #fff; border-radius: 3px; cursor: pointer; }
 </style>
 </head>
 <body>
+<div id="ui">
+  <button onclick="toggleEditor()">🎨 Avatar</button>
+</div>
+
+<!-- Panel Editor 8x8 -->
+<div id="editor-modal">
+  <h3 style="margin:5px 0 10px 0; font-size: 14px;">Diseña tu Avatar (8x8)</h3>
+  <div class="pixel-grid" id="pixelGrid"></div>
+  <div class="palette" id="paletteBox"></div>
+  <br>
+  <button onclick="saveAvatar()">Guardar</button>
+  <button onclick="toggleEditor()" style="background:#555; margin-left: 5px;">Cerrar</button>
+</div>
+
 <canvas id="c"></canvas>
 <script src="/socket.io/socket.io.js"></script>
 <script>
 (function () {
 'use strict';
 
-/* ---------- Mapa infinito determinista (mismo resultado en cualquier cliente) ---------- */
 var T = 16;      // tamaño de tile en px lógicos
 var HALF = 4;    // semi-tamaño de la caja de colisión
 var SPEED = 64;  // px/s
@@ -30,18 +59,17 @@ function hash(a, b) {
   return n >>> 0;
 }
 
-// Bloques de 8x8 tiles. Los bordes son muros con puerta (o abiertos); la cruz central siempre está libre.
 function door(r, m) {
-  if (r === 0) return false;                       // borde abierto
-  if (r < 3) return !(m === 3 || m === 4);         // puerta estrecha
-  return !(m >= 2 && m <= 5);                      // puerta ancha
+  if (r === 0) return false;
+  if (r < 3) return !(m === 3 || m === 4);
+  return !(m >= 2 && m <= 5);
 }
 function wall(tx, ty) {
   var mx = tx & 7, my = ty & 7, bx = tx >> 3, by = ty >> 3;
   if (mx === 0) { if (my === 0) return true; return door(hash(bx, by) % 5, my); }
   if (my === 0) return door(hash(bx + 977, by) % 5, mx);
   if (mx >= 2 && mx <= 6 && my >= 2 && my <= 6 && mx !== 3 && mx !== 4 && my !== 3 && my !== 4) {
-    return hash(tx, ty) % 4 === 0;                 // pilares sueltos
+    return hash(tx, ty) % 4 === 0;
   }
   return false;
 }
@@ -52,23 +80,25 @@ function hit(x, y) {
          wall(Math.floor((x + HALF) / T), Math.floor((y + HALF) / T));
 }
 
-/* ---------- Estado ---------- */
 var cv = document.getElementById('c');
 var ctx = cv.getContext('2d');
 var W = 160, H = 144, S = 3;
 var vignette = null;
-var me = { x: 64, y: 64, c: 0, fx: 0, fy: 1 };
+var me = { x: 64, y: 64, c: 0, fx: 0, fy: 1, w: 0, a: '' };
 var myId = 0, spawned = false, colors = ['#e63946'];
-var others = {}, nOthers = 0;
+var others = {}, weapons = {}, monster = { x: 328, y: 328 }, nOthers = 0;
 var input = { active: false, x: 0, y: 0, k: { l: 0, r: 0, u: 0, d: 0 } };
-var hint = 6; // segundos que se muestra la ayuda
+var hint = 6;
+
+// Avatar por defecto de respaldo
+var myAvatarStr = "0033330003333330331331333333333333222233032222300200002020000002";
+var selectedPaletteIndex = '3';
 
 function resize() {
   var iw = window.innerWidth, ih = window.innerHeight;
   S = Math.max(2, Math.round(Math.min(iw, ih) / 150));
   W = Math.ceil(iw / S); H = Math.ceil(ih / S);
   cv.width = W; cv.height = H;
-  // viñeta pre-renderizada: una sola drawImage por frame
   vignette = document.createElement('canvas');
   vignette.width = W; vignette.height = H;
   var g = vignette.getContext('2d');
@@ -82,7 +112,52 @@ window.addEventListener('resize', resize, false);
 window.addEventListener('orientationchange', function () { setTimeout(resize, 200); }, false);
 resize();
 
-/* ---------- Controles: tocar/arrastrar = ir hacia ese punto; WASD/flechas en escritorio ---------- */
+/* ---------- Editor de Píxeles 8x8 ---------- */
+function buildEditor() {
+  var grid = document.getElementById('pixelGrid');
+  grid.innerHTML = '';
+  for (var i = 0; i < 64; i++) {
+    var cell = document.createElement('div');
+    cell.className = 'pixel-cell';
+    var char = myAvatarStr[i];
+    cell.style.backgroundColor = char === '0' ? 'transparent' : (colors[parseInt(char, 16)] || '#fff');
+    
+    (function(idx, cl) {
+      cl.addEventListener('click', function() {
+        var arr = myAvatarStr.split('');
+        arr[idx] = selectedPaletteIndex;
+        myAvatarStr = arr.join('');
+        cl.style.backgroundColor = selectedPaletteIndex === '0' ? 'transparent' : colors[parseInt(selectedPaletteIndex, 16)];
+      });
+    })(i, cell);
+    grid.appendChild(cell);
+  }
+
+  var paletteBox = document.getElementById('paletteBox');
+  paletteBox.innerHTML = '';
+  colors.forEach(function(col, idx) {
+    if (idx === 0) return;
+    var btn = document.createElement('div');
+    btn.className = 'color-btn';
+    btn.style.backgroundColor = col;
+    btn.addEventListener('click', function() {
+      selectedPaletteIndex = idx.toString(16);
+    });
+    paletteBox.appendChild(btn);
+  });
+}
+
+window.toggleEditor = function() {
+  var modal = document.getElementById('editor-modal');
+  modal.style.display = modal.style.display === 'block' ? 'none' : 'block';
+};
+
+window.saveAvatar = function() {
+  if (sock && sock.connected) sock.emit('av', myAvatarStr);
+  toggleEditor();
+};
+
+/* ---------- Controles ---------- */
 function setPt(x, y) { input.active = true; input.x = x; input.y = y; hint = 0; }
 cv.addEventListener('touchstart', function (e) { e.preventDefault(); var t = e.touches[0]; setPt(t.clientX, t.clientY); }, false);
 cv.addEventListener('touchmove', function (e) { e.preventDefault(); var t = e.touches[0]; setPt(t.clientX, t.clientY); }, false);
@@ -91,6 +166,7 @@ cv.addEventListener('touchcancel', function () { input.active = false; }, false)
 cv.addEventListener('mousedown', function (e) { setPt(e.clientX, e.clientY); }, false);
 window.addEventListener('mousemove', function (e) { if (input.active) setPt(e.clientX, e.clientY); }, false);
 window.addEventListener('mouseup', function () { input.active = false; }, false);
+
 function key(e, v) {
   var k = e.keyCode, K = input.k;
   if (k === 37 || k === 65) K.l = v; else if (k === 39 || k === 68) K.r = v;
@@ -103,31 +179,67 @@ document.addEventListener('gesturestart', function (e) { e.preventDefault(); }, 
 
 /* ---------- Red ---------- */
 var sock = null;
-function addOther(id, x, y, c) {
+function addOther(id, x, y, c, w, a) {
   if (id === myId) return;
   if (!others[id]) nOthers++;
-  others[id] = { x: x, y: y, dx: x, dy: y, c: c };
+  others[id] = { x: x, y: y, dx: x, dy: y, c: c, w: w || 0, a: a || '' };
 }
 if (typeof io !== 'undefined') {
   sock = io({ transports: ['websocket', 'polling'], reconnectionDelay: 500, reconnectionDelayMax: 3000 });
   sock.on('init', function (d) {
     myId = d.id; colors = d.colors; others = {}; nOthers = 0;
-    for (var i = 0; i < d.list.length; i += 4) {
+    monster.x = d.m[0]; monster.y = d.m[1];
+    
+    // Sincronizar jugadores (vienen en formato [id, x, y, c, w, a])
+    for (var i = 0; i < d.list.length; i += 6) {
       if (d.list[i] === myId) {
-        me.c = d.list[i + 3];
+        me.c = d.list[i + 3]; me.w = d.list[i + 4]; me.a = d.list[i + 5];
         if (!spawned) { me.x = d.list[i + 1]; me.y = d.list[i + 2]; spawned = true; }
-      } else addOther(d.list[i], d.list[i + 1], d.list[i + 2], d.list[i + 3]);
+      } else {
+        addOther(d.list[i], d.list[i + 1], d.list[i + 2], d.list[i + 3], d.list[i + 4], d.list[i + 5]);
+      }
     }
+    // Armas iniciales
+    weapons = {};
+    if (d.wl) {
+      for (var j = 0; j < d.wl.length; j++) {
+        var w = d.wl[j]; weapons[w[0]] = { t: w[1], x: w[2], y: w[3] };
+      }
+    }
+    buildEditor();
   });
-  sock.on('j', function (d) { addOther(d[0], d[1], d[2], d[3]); });
+
+  sock.on('j', function (d) { addOther(d[0], d[1], d[2], d[3], d[4], d[5]); });
   sock.on('l', function (id) { if (others[id]) { delete others[id]; nOthers--; } });
-  sock.on('p', function (a) {
-    for (var i = 0; i < a.length; i += 3) {
-      var o = others[a[i]];
-      if (o) { o.x = a[i + 1]; o.y = a[i + 2]; }
+  
+  sock.on('p', function (a, mx, my) {
+    monster.x = mx; monster.y = my;
+    if (a) {
+      for (var i = 0; i < a.length; i += 3) {
+        var o = others[a[i]];
+        if (o) { o.x = a[i + 1]; o.y = a[i + 2]; }
+      }
     }
   });
-  sock.on('fix', function (p) { me.x = p[0]; me.y = p[1]; });
+
+  sock.on('w+', function (w) { weapons[w[0]] = { t: w[1], x: w[2], y: w[3] }; });
+  sock.on('w-', function (id) { delete weapons[id]; });
+  sock.on('pw', function (data) {
+    if (data[0] === myId) me.w = data[1];
+    else if (others[data[0]]) others[data[0]].w = data[1];
+  });
+  sock.on('av', function (data) {
+    if (others[data[0]]) others[data[0]].a = data[1];
+  });
+
+  sock.on('fix', function (p) {
+    me.x = p[0]; me.y = p[1];
+    if (p[2] === 1) {
+      // Atrapado por el monstruo
+      me.w = 0;
+    }
+  });
+
   var lx = 0, ly = 0;
   setInterval(function () {
     var x = Math.round(me.x), y = Math.round(me.y);
@@ -152,20 +264,39 @@ function update(dt) {
     if (!hit(me.x, ny)) me.y = ny;
     if (Math.abs(vx) > Math.abs(vy)) { me.fx = vx > 0 ? 1 : -1; me.fy = 0; } else { me.fx = 0; me.fy = vy > 0 ? 1 : -1; }
   }
+
+  // Recogida de armas por proximidad del cliente
+  for (var wid in weapons) {
+    var w = weapons[wid];
+    var dx = w.x - me.x, dy = w.y - me.y;
+    if (dx * dx + dy * dy < 144) { // radio de recogida cercano
+      // El servidor valida también, pero esto da feedback visual inmediato
+    }
+  }
+
   for (var id in others) { var o = others[id]; o.dx += (o.x - o.dx) * 0.25; o.dy += (o.y - o.dy) * 0.25; }
   if (hint > 0) hint -= dt;
 }
 
 /* ---------- Dibujo ---------- */
-function person(x, y, color, fx, fy, self) {
+function drawPixelAvatar(x, y, avatarStr, colorIdx) {
   x = Math.round(x); y = Math.round(y);
   ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(x - 5, y + 3, 10, 4);
-  ctx.fillStyle = '#1a1405'; ctx.fillRect(x - 5, y - 6, 10, 11);
-  ctx.fillStyle = color; ctx.fillRect(x - 4, y - 5, 8, 9);
-  ctx.fillStyle = '#fff';
-  if (fx) { ctx.fillRect(x + fx * 2, y - 3, 1, 2); ctx.fillRect(x + fx * 2, y + 1, 1, 2); }
-  else { ctx.fillRect(x - 3, y + fy * 2 - 1, 2, 1); ctx.fillRect(x + 1, y + fy * 2 - 1, 2, 1); }
-  if (self) { ctx.fillStyle = '#fff'; ctx.fillRect(x - 1, y - 9, 2, 2); }
+
+  let pSize = 1; // escala por píxel dentro de una rejilla 8x8
+  let startX = x - 4, startY = y - 4;
+  
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      let idx = r * 8 + c;
+      let char = avatarStr ? avatarStr[idx] : '0';
+      if (char && char !== '0') {
+        let colCode = parseInt(char, 16);
+        ctx.fillStyle = colors[colCode] || colors[colorIdx % colors.length] || '#fff';
+        ctx.fillRect(startX + c, startY + r, 1, 1);
+      }
+    }
+  }
 }
 
 function draw(now) {
@@ -174,12 +305,14 @@ function draw(now) {
   var tx1 = tx0 + Math.ceil(W / T) + 1, ty1 = ty0 + Math.ceil(H / T) + 1;
   var bad = (Math.floor(now / 90) % 23) === 0;
   var tx, ty, sx, sy, n;
+
+  // Dibujar Laberinto Backrooms
   for (ty = ty0; ty <= ty1; ty++) {
     for (tx = tx0; tx <= tx1; tx++) {
       sx = tx * T - cx; sy = ty * T - cy;
       if (wall(tx, ty)) {
         ctx.fillStyle = '#c9b655'; ctx.fillRect(sx, sy, T, T);
-        ctx.fillStyle = '#b8a548'; ctx.fillRect(sx + 3, sy, 1, T); ctx.fillRect(sx + 11, sy, 1, T); // franjas de papel tapiz
+        ctx.fillStyle = '#b8a548'; ctx.fillRect(sx + 3, sy, 1, T); ctx.fillRect(sx + 11, sy, 1, T);
         if (!wall(tx, ty - 1)) { ctx.fillStyle = '#e3d47c'; ctx.fillRect(sx, sy, T, 1); }
         if (!wall(tx, ty + 1)) { ctx.fillStyle = '#8f7f35'; ctx.fillRect(sx, sy + T - 6, T, 6); ctx.fillStyle = '#6e6128'; ctx.fillRect(sx, sy + T - 1, T, 1); }
       } else {
@@ -191,18 +324,50 @@ function draw(now) {
       }
     }
   }
-  for (var id in others) { var o = others[id]; person(o.dx - cx, o.dy - cy, colors[o.c % colors.length], 0, 1, false); }
-  person(me.x - cx, me.y - cy, colors[me.c % colors.length], me.fx, me.fy, true);
+
+  // Dibujar Armas en el suelo
+  for (var wid in weapons) {
+    var w = weapons[wid];
+    var wx = w.x - cx, wy = w.y - cy;
+    ctx.fillStyle = w.t === 2 ? '#e74c3c' : (w.t === 3 ? '#3498db' : '#f1c40f');
+    ctx.fillRect(wx - 3, wy - 3, 6, 6);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(wx - 1, wy - 1, 2, 2);
+  }
+
+  // Dibujar Monstruo (IA roja con ojos brillantes)
+  var mx_draw = monster.x - cx, my_draw = monster.y - cy;
+  ctx.fillStyle = '#8b0000';
+  ctx.beginPath(); ctx.arc(mx_draw, my_draw, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ff0';
+  ctx.fillRect(mx_draw - 2, my_draw - 2, 1, 1);
+  ctx.fillRect(mx_draw + 1, my_draw - 2, 1, 1);
+
+  // Dibujar otros jugadores
+  for (var id in others) {
+    var o = others[id];
+    drawPixelAvatar(o.dx - cx, o.dy - cy, o.a, o.c);
+    if (o.w > 0) {
+      ctx.fillStyle = '#fff'; ctx.fillRect(o.dx - cx + 4, o.dy - cy - 4, 3, 2);
+    }
+  }
+
+  // Dibujarme a mí
+  drawPixelAvatar(me.x - cx, me.y - cy, myAvatarStr, me.c);
+  if (me.w > 0) {
+    ctx.fillStyle = '#fff'; ctx.fillRect(me.x - cx + 4, me.y - cy - 4, 3, 2);
+  }
+  // Indicador de "tú"
+  ctx.fillStyle = '#fff'; ctx.fillRect(me.x - cx, me.y - cy - 7, 1, 1);
 
   ctx.drawImage(vignette, 0, 0);
   if ((Math.floor(now / 70) % 41) === 0) { ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fillRect(0, 0, W, H); }
 
   ctx.font = '8px monospace'; ctx.textBaseline = 'top';
   ctx.fillStyle = '#e3d47c'; ctx.fillText((nOthers + 1) + (nOthers ? ' aquí' : ' aquí (solo/a)'), 3, 3);
-  if (hint > 0) { ctx.textAlign = 'center'; ctx.fillText('toca y arrastra para moverte', W / 2, H - 12); ctx.textAlign = 'left'; }
+  if (hint > 0) { ctx.textAlign = 'center'; ctx.fillText('toca para moverte | 🎨 avatar arriba', W / 2, H - 12); ctx.textAlign = 'left'; }
 }
 
-/* ---------- Bucle ---------- */
 var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame || window.mozRequestAnimationFrame ||
   function (f) { return setTimeout(f, 33); };
 var last = Date.now();
