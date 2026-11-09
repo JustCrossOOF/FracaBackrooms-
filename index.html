@@ -10,9 +10,18 @@ html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#
 -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;touch-action:none;font-family:sans-serif;}
 canvas{display:block;width:100%;height:100%;image-rendering:-moz-crisp-edges;image-rendering:-webkit-optimize-contrast;image-rendering:pixelated;-ms-interpolation-mode:nearest-neighbor}
 #ui {
-  position: absolute; top: 10px; right: 10px; z-index: 10;
+  position: absolute; top: 10px; right: 10px; z-index: 10; display: flex; gap: 8px;
 }
 button { background: #d4ac0d; border: none; padding: 8px 12px; font-weight: bold; border-radius: 4px; color: #fff; cursor: pointer; font-size: 11px; }
+
+/* Botón de Disparo Táctil Flotante */
+#shoot-btn {
+  position: absolute; bottom: 25px; right: 25px; z-index: 10;
+  width: 65px; height: 65px; background: #c0392b; border-radius: 50%;
+  border: 3px solid #fff; color: white; font-size: 24px;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.5); display: none;
+}
 
 /* Editor Modal */
 #editor-modal {
@@ -25,6 +34,7 @@ button { background: #d4ac0d; border: none; padding: 8px 12px; font-weight: bold
 .pixel-cell { width: 28px; height: 28px; background: #222; border: 1px solid #444; cursor: pointer; }
 .palette { display: flex; gap: 4px; justify-content: center; margin-top: 8px; flex-wrap: wrap; }
 .color-btn { width: 22px; height: 22px; border: 2px solid #fff; border-radius: 3px; cursor: pointer; }
+.eraser-btn { background: #555; color: #fff; border: 2px dashed #fff; }
 </style>
 </head>
 <body>
@@ -32,11 +42,16 @@ button { background: #d4ac0d; border: none; padding: 8px 12px; font-weight: bold
   <button onclick="toggleEditor()">🎨 Avatar</button>
 </div>
 
-<!-- Panel Editor 8x8 -->
+<!-- Botón de Disparo -->
+<div id="shoot-btn" onclick="triggerShoot()">💥</div>
+
+<!-- Panel Editor 8x8 con Borrador -->
 <div id="editor-modal">
   <h3 style="margin:5px 0 10px 0; font-size: 14px;">Diseña tu Avatar (8x8)</h3>
   <div class="pixel-grid" id="pixelGrid"></div>
-  <div class="palette" id="paletteBox"></div>
+  <div class="palette" id="paletteBox">
+    <div class="color-btn eraser-btn" onclick="selectEraser()" title="Borrar Píxel">🧹</div>
+  </div>
   <br>
   <button onclick="saveAvatar()">Guardar</button>
   <button onclick="toggleEditor()" style="background:#555; margin-left: 5px;">Cerrar</button>
@@ -48,9 +63,9 @@ button { background: #d4ac0d; border: none; padding: 8px 12px; font-weight: bold
 (function () {
 'use strict';
 
-var T = 16;      // tamaño de tile en px lógicos
-var HALF = 4;    // semi-tamaño de la caja de colisión
-var SPEED = 64;  // px/s
+var T = 16;      
+var HALF = 4;    
+var SPEED = 64;  
 
 function hash(a, b) {
   var n = (a * 73856093) ^ (b * 19349663);
@@ -84,15 +99,14 @@ var cv = document.getElementById('c');
 var ctx = cv.getContext('2d');
 var W = 160, H = 144, S = 3;
 var vignette = null;
-var me = { x: 64, y: 64, c: 0, fx: 0, fy: 1, w: 0, a: '' };
+var me = { x: 64, y: 64, c: 0, fx: 1, fy: 0, w: 0, a: '' };
 var myId = 0, spawned = false, colors = ['#e63946'];
-var others = {}, weapons = {}, monster = { x: 328, y: 328 }, nOthers = 0;
+var others = {}, weapons = {}, monster = { x: 328, y: 328 }, bullets = [], nOthers = 0;
 var input = { active: false, x: 0, y: 0, k: { l: 0, r: 0, u: 0, d: 0 } };
 var hint = 6;
 
-// Avatar por defecto de respaldo
 var myAvatarStr = "0033330003333330331331333333333333222233032222300200002020000002";
-var selectedPaletteIndex = '3';
+var selectedPaletteIndex = '3'; // Color actual ('0' es borrar)
 
 function resize() {
   var iw = window.innerWidth, ih = window.innerHeight;
@@ -109,10 +123,9 @@ function resize() {
   g.fillStyle = gr; g.fillRect(0, 0, W, H);
 }
 window.addEventListener('resize', resize, false);
-window.addEventListener('orientationchange', function () { setTimeout(resize, 200); }, false);
 resize();
 
-/* ---------- Editor de Píxeles 8x8 ---------- */
+/* ---------- Editor de Píxeles 8x8 con Borrador ---------- */
 function buildEditor() {
   var grid = document.getElementById('pixelGrid');
   grid.innerHTML = '';
@@ -134,18 +147,25 @@ function buildEditor() {
   }
 
   var paletteBox = document.getElementById('paletteBox');
-  paletteBox.innerHTML = '';
+  // Mantener el botón de borrar y añadir los de color de la red
+  paletteBox.innerHTML = '<div class="color-btn eraser-btn" onclick="selectEraser()" title="Borrar Píxel">🧹</div>';
   colors.forEach(function(col, idx) {
     if (idx === 0) return;
     var btn = document.createElement('div');
     btn.className = 'color-btn';
     btn.style.backgroundColor = col;
-    btn.addEventListener('click', function() {
-      selectedPaletteIndex = idx.toString(16);
-    });
+    (function(cIdx) {
+      btn.addEventListener('click', function() {
+        selectedPaletteIndex = cIdx.toString(16);
+      });
+    })(idx);
     paletteBox.appendChild(btn);
   });
 }
+
+window.selectEraser = function() {
+  selectedPaletteIndex = '0';
+};
 
 window.toggleEditor = function() {
   var modal = document.getElementById('editor-modal');
@@ -162,35 +182,42 @@ function setPt(x, y) { input.active = true; input.x = x; input.y = y; hint = 0; 
 cv.addEventListener('touchstart', function (e) { e.preventDefault(); var t = e.touches[0]; setPt(t.clientX, t.clientY); }, false);
 cv.addEventListener('touchmove', function (e) { e.preventDefault(); var t = e.touches[0]; setPt(t.clientX, t.clientY); }, false);
 cv.addEventListener('touchend', function (e) { e.preventDefault(); if (!e.touches.length) input.active = false; }, false);
-cv.addEventListener('touchcancel', function () { input.active = false; }, false);
 cv.addEventListener('mousedown', function (e) { setPt(e.clientX, e.clientY); }, false);
 window.addEventListener('mousemove', function (e) { if (input.active) setPt(e.clientX, e.clientY); }, false);
 window.addEventListener('mouseup', function () { input.active = false; }, false);
 
-function key(e, v) {
+window.triggerShoot = function() {
+  if (me.w > 0 && sock && sock.connected) {
+    sock.emit('shoot', { x: me.x, y: me.y, fx: me.fx, fy: me.fy });
+    // Feedback visual de bala local
+    bullets.push({ x: me.x, y: me.y, dx: me.fx * 180, dy: me.fy * 180, life: 0.4 });
+  }
+};
+
+window.addEventListener('keydown', function (e) {
+  if (e.code === 'Space') { triggerShoot(); e.preventDefault(); }
   var k = e.keyCode, K = input.k;
-  if (k === 37 || k === 65) K.l = v; else if (k === 39 || k === 68) K.r = v;
-  else if (k === 38 || k === 87) K.u = v; else if (k === 40 || k === 83) K.d = v; else return;
-  hint = 0; e.preventDefault();
-}
-window.addEventListener('keydown', function (e) { key(e, 1); }, false);
-window.addEventListener('keyup', function (e) { key(e, 0); }, false);
-document.addEventListener('gesturestart', function (e) { e.preventDefault(); }, false);
+  if (k === 37 || k === 65) K.l = v=1; else if (k === 39 || k === 68) K.r = 1;
+  else if (k === 38 || k === 87) K.u = 1; else if (k === 40 || k === 83) K.d = 1;
+}, false);
+window.addEventListener('keyup', function (e) {
+  var k = e.keyCode, K = input.k;
+  if (k === 37 || k === 65) K.l = 0; else if (k === 39 || k === 68) K.r = 0;
+  else if (k === 38 || k === 87) K.u = 0; else if (k === 40 || k === 83) K.d = 0;
+}, false);
 
 /* ---------- Red ---------- */
 var sock = null;
 function addOther(id, x, y, c, w, a) {
   if (id === myId) return;
   if (!others[id]) nOthers++;
-  others[id] = { x: x, y: y, dx: x, dy: y, c: c, w: w || 0, a: a || '' };
+  others[id] = { x: x, y: y, dx: x, dy: y, c: c, w: w || 0, a: a || '', fx: 1, fy: 0 };
 }
 if (typeof io !== 'undefined') {
-  sock = io({ transports: ['websocket', 'polling'], reconnectionDelay: 500, reconnectionDelayMax: 3000 });
+  sock = io({ transports: ['websocket', 'polling'], reconnectionDelay: 500 });
   sock.on('init', function (d) {
     myId = d.id; colors = d.colors; others = {}; nOthers = 0;
     monster.x = d.m[0]; monster.y = d.m[1];
-    
-    // Sincronizar jugadores (vienen en formato [id, x, y, c, w, a])
     for (var i = 0; i < d.list.length; i += 6) {
       if (d.list[i] === myId) {
         me.c = d.list[i + 3]; me.w = d.list[i + 4]; me.a = d.list[i + 5];
@@ -199,13 +226,8 @@ if (typeof io !== 'undefined') {
         addOther(d.list[i], d.list[i + 1], d.list[i + 2], d.list[i + 3], d.list[i + 4], d.list[i + 5]);
       }
     }
-    // Armas iniciales
     weapons = {};
-    if (d.wl) {
-      for (var j = 0; j < d.wl.length; j++) {
-        var w = d.wl[j]; weapons[w[0]] = { t: w[1], x: w[2], y: w[3] };
-      }
-    }
+    if (d.wl) { for (var j = 0; j < d.wl.length; j++) { var w = d.wl[j]; weapons[w[0]] = { t: w[1], x: w[2], y: w[3] }; } }
     buildEditor();
   });
 
@@ -225,20 +247,15 @@ if (typeof io !== 'undefined') {
   sock.on('w+', function (w) { weapons[w[0]] = { t: w[1], x: w[2], y: w[3] }; });
   sock.on('w-', function (id) { delete weapons[id]; });
   sock.on('pw', function (data) {
-    if (data[0] === myId) me.w = data[1];
-    else if (others[data[0]]) others[data[0]].w = data[1];
-  });
-  sock.on('av', function (data) {
-    if (others[data[0]]) others[data[0]].a = data[1];
-  });
-
-  sock.on('fix', function (p) {
-    me.x = p[0]; me.y = p[1];
-    if (p[2] === 1) {
-      // Atrapado por el monstruo
-      me.w = 0;
+    if (data[0] === myId) {
+      me.w = data[1];
+      document.getElementById('shoot-btn').style.display = me.w > 0 ? 'flex' : 'none';
+    } else if (others[data[0]]) {
+      others[data[0]].w = data[1];
     }
   });
+  sock.on('av', function (data) { if (others[data[0]]) others[data[0]].a = data[1]; });
+  sock.on('fix', function (p) { me.x = p[0]; me.y = p[1]; });
 
   var lx = 0, ly = 0;
   setInterval(function () {
@@ -265,27 +282,23 @@ function update(dt) {
     if (Math.abs(vx) > Math.abs(vy)) { me.fx = vx > 0 ? 1 : -1; me.fy = 0; } else { me.fx = 0; me.fy = vy > 0 ? 1 : -1; }
   }
 
-  // Recogida de armas por proximidad del cliente
-  for (var wid in weapons) {
-    var w = weapons[wid];
-    var dx = w.x - me.x, dy = w.y - me.y;
-    if (dx * dx + dy * dy < 144) { // radio de recogida cercano
-      // El servidor valida también, pero esto da feedback visual inmediato
-    }
+  // Actualizar balas locales
+  for (var i = bullets.length - 1; i >= 0; i--) {
+    var b = bullets[i];
+    b.x += b.dx * dt; b.y += b.dy * dt;
+    b.life -= dt;
+    if (b.life <= 0) bullets.splice(i, 1);
   }
 
   for (var id in others) { var o = others[id]; o.dx += (o.x - o.dx) * 0.25; o.dy += (o.y - o.dy) * 0.25; }
   if (hint > 0) hint -= dt;
 }
 
-/* ---------- Dibujo ---------- */
+/* ---------- Dibujo de Sprites Nítidos (Pixel Perfect) ---------- */
 function drawPixelAvatar(x, y, avatarStr, colorIdx) {
   x = Math.round(x); y = Math.round(y);
-  ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(x - 5, y + 3, 10, 4);
-
-  let pSize = 1; // escala por píxel dentro de una rejilla 8x8
+  ctx.fillStyle = 'rgba(0,0,0,0.35);'; ctx.fillRect(x - 5, y + 3, 10, 4);
   let startX = x - 4, startY = y - 4;
-  
   for (let r = 0; r < 8; r++) {
     for (let c = 0; c < 8; c++) {
       let idx = r * 8 + c;
@@ -299,6 +312,19 @@ function drawPixelAvatar(x, y, avatarStr, colorIdx) {
   }
 }
 
+// Dibujar pistola nítida y alineada con la dirección del jugador
+function drawGun(x, y, fx, fy) {
+  x = Math.round(x); y = Math.round(y);
+  ctx.fillStyle = '#bdc3c7'; // Cañón de metal limpio
+  if (fx !== 0) {
+    ctx.fillRect(x + (fx > 0 ? 4 : -7), y, 4, 2);
+    ctx.fillStyle = '#7f8c8d'; // Empuñadura
+    ctx.fillRect(x + (fx > 0 ? 5 : -5), y + 2, 1, 2);
+  } else {
+    ctx.fillRect(x, y + (fy > 0 ? 4 : -7), 2, 4);
+  }
+}
+
 function draw(now) {
   var cx = Math.round(me.x - W / 2), cy = Math.round(me.y - H / 2);
   var tx0 = Math.floor(cx / T), ty0 = Math.floor(cy / T);
@@ -306,7 +332,6 @@ function draw(now) {
   var bad = (Math.floor(now / 90) % 23) === 0;
   var tx, ty, sx, sy, n;
 
-  // Dibujar Laberinto Backrooms
   for (ty = ty0; ty <= ty1; ty++) {
     for (tx = tx0; tx <= tx1; tx++) {
       sx = tx * T - cx; sy = ty * T - cy;
@@ -325,17 +350,24 @@ function draw(now) {
     }
   }
 
-  // Dibujar Armas en el suelo
+  // Armas en suelo (nítidas)
   for (var wid in weapons) {
     var w = weapons[wid];
     var wx = w.x - cx, wy = w.y - cy;
-    ctx.fillStyle = w.t === 2 ? '#e74c3c' : (w.t === 3 ? '#3498db' : '#f1c40f');
-    ctx.fillRect(wx - 3, wy - 3, 6, 6);
+    ctx.fillStyle = w.t === 2 ? '#e74c3c' : '#f1c40f';
+    ctx.fillRect(wx - 3, wy - 3, 6, 4);
     ctx.fillStyle = '#fff';
     ctx.fillRect(wx - 1, wy - 1, 2, 2);
   }
 
-  // Dibujar Monstruo (IA roja con ojos brillantes)
+  // Balas
+  ctx.fillStyle = '#ff0';
+  for (var i = 0; i < bullets.length; i++) {
+    var b = bullets[i];
+    ctx.fillRect(b.x - cx, b.y - cy, 2, 2);
+  }
+
+  // Monstruo
   var mx_draw = monster.x - cx, my_draw = monster.y - cy;
   ctx.fillStyle = '#8b0000';
   ctx.beginPath(); ctx.arc(mx_draw, my_draw, 6, 0, Math.PI * 2); ctx.fill();
@@ -343,33 +375,24 @@ function draw(now) {
   ctx.fillRect(mx_draw - 2, my_draw - 2, 1, 1);
   ctx.fillRect(mx_draw + 1, my_draw - 2, 1, 1);
 
-  // Dibujar otros jugadores
+  // Otros jugadores
   for (var id in others) {
     var o = others[id];
     drawPixelAvatar(o.dx - cx, o.dy - cy, o.a, o.c);
-    if (o.w > 0) {
-      ctx.fillStyle = '#fff'; ctx.fillRect(o.dx - cx + 4, o.dy - cy - 4, 3, 2);
-    }
+    if (o.w > 0) drawGun(o.dx - cx, o.dy - cy, o.fx, o.fy);
   }
 
-  // Dibujarme a mí
+  // Yo
   drawPixelAvatar(me.x - cx, me.y - cy, myAvatarStr, me.c);
-  if (me.w > 0) {
-    ctx.fillStyle = '#fff'; ctx.fillRect(me.x - cx + 4, me.y - cy - 4, 3, 2);
-  }
-  // Indicador de "tú"
-  ctx.fillStyle = '#fff'; ctx.fillRect(me.x - cx, me.y - cy - 7, 1, 1);
+  if (me.w > 0) drawGun(me.x - cx, me.y - cy, me.fx, me.fy);
 
   ctx.drawImage(vignette, 0, 0);
-  if ((Math.floor(now / 70) % 41) === 0) { ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fillRect(0, 0, W, H); }
-
   ctx.font = '8px monospace'; ctx.textBaseline = 'top';
   ctx.fillStyle = '#e3d47c'; ctx.fillText((nOthers + 1) + (nOthers ? ' aquí' : ' aquí (solo/a)'), 3, 3);
-  if (hint > 0) { ctx.textAlign = 'center'; ctx.fillText('toca para moverte | 🎨 avatar arriba', W / 2, H - 12); ctx.textAlign = 'left'; }
+  if (hint > 0) { ctx.textAlign = 'center'; ctx.fillText('toca para moverte | 💥 botón para disparar', W / 2, H - 12); ctx.textAlign = 'left'; }
 }
 
-var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame || window.mozRequestAnimationFrame ||
-  function (f) { return setTimeout(f, 33); };
+var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame || function (f) { return setTimeout(f, 33); };
 var last = Date.now();
 function loop() {
   raf(loop);
