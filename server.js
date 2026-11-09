@@ -33,7 +33,6 @@ function wall(tx, ty) {
   }
   return false;
 }
-// punto aleatorio libre (centro de tile) en un anillo alrededor de (cx,cy)
 function randFree(cx, cy, rmin, rmax) {
   for (var i = 0; i < 30; i++) {
     var a = Math.random() * 6.2832, r = rmin + Math.random() * (rmax - rmin);
@@ -44,7 +43,7 @@ function randFree(cx, cy, rmin, rmax) {
 }
 
 /* ---------- HTTP + Socket.io ---------- */
-var html = fs.readFileSync(path.join(__dirname, 'index.html'));
+var html = fs.existsSync(path.join(__dirname, 'index.html')) ? fs.readFileSync(path.join(__dirname, 'index.html')) : '';
 var server = http.createServer(function (req, res) {
   var u = req.url.split('?')[0];
   if (u === '/' || u === '/index.html') {
@@ -75,7 +74,7 @@ function spawnWeaponNear(p) {
 }
 function upkeepWeapons() {
   var ids = Object.keys(players), i, wid;
-  for (wid in weps) { // retirar armas lejos de todos
+  for (wid in weps) {
     var w = weps[wid], far = true;
     for (i = 0; i < ids.length; i++) {
       var p = players[ids[i]], dx = w.x - p.x, dy = w.y - p.y;
@@ -83,12 +82,12 @@ function upkeepWeapons() {
     }
     if (far) { delete weps[wid]; wc--; io.emit('w-', +wid); }
   }
-  if (wc < Math.min(MAX_WEAPONS, 3 + ids.length * 2)) {
+  if (wc < Math.min(MAX_WEAPONS, 3 + ids.length * 2) && ids.length > 0) {
     spawnWeaponNear(players[ids[Math.floor(Math.random() * ids.length)]]);
   }
 }
 
-/* ---------- Monstruo: BFS acotado sobre la rejilla de tiles, 1 búsqueda por tick ---------- */
+/* ---------- Monstruo: BFS acotado sobre la rejilla de tiles ---------- */
 var R = 24, N = 2 * R;
 var prev = new Int32Array(N * N), queue = new Int32Array(N * N);
 var DX = [1, -1, 0, 0], DY = [0, 0, 1, -1];
@@ -132,7 +131,7 @@ function moveMonster(dt) {
   var tp = nearestPlayer();
   if (!tp) return;
   var wp = plan(tp);
-  if (!wp) { // atascado: tras 4 s reaparece cerca del objetivo
+  if (!wp) {
     monster.stuck += dt;
     if (monster.stuck > 4) {
       var pos = randFree(tp.x, tp.y, 150, 260);
@@ -153,7 +152,7 @@ function respawn(p, id, now) {
   spawnPos(p);
   p.w = 0; p.t = now; p.safe = now + 3000;
   monster.stun = 2;
-  p.s.emit('fix', [p.x, p.y, 1]); // 3er valor: "te atrapó"
+  p.s.emit('fix', [p.x, p.y, 1]);
   io.emit('pw', [+id, 0]);
   dirty = true;
 }
@@ -164,7 +163,7 @@ io.on('connection', function (socket) {
   var id = nextId++, now = Date.now();
   var p = { x: 0, y: 0, c: Math.floor(Math.random() * COLORS.length), w: 0, a: '', t: now, at: 0, safe: now + 3000, s: socket };
   spawnPos(p);
-  if (count === 0) { // primer jugador: el monstruo empieza lejos
+  if (count === 0) {
     var mp = randFree(p.x, p.y, 350, 450);
     if (mp) { monster.x = mp.x; monster.y = mp.y; }
     monster.stun = 0;
@@ -175,6 +174,7 @@ io.on('connection', function (socket) {
   var list = [], wl = [], k;
   for (k in players) { var q = players[k]; list.push([+k, q.x, q.y, q.c, q.w, q.a]); }
   for (k in weps) wl.push([+k, weps[k].t, weps[k].x, weps[k].y]);
+  
   socket.emit('init', { id: id, colors: COLORS, list: list, wl: wl, m: [Math.round(monster.x), Math.round(monster.y)] });
   socket.broadcast.emit('j', [id, p.x, p.y, p.c, p.w, p.a]);
 
@@ -188,7 +188,6 @@ io.on('connection', function (socket) {
     dirty = true;
   });
 
-  // Avatar 8x8: string de 64 hex (0 = transparente, 1-f = color de la paleta del cliente)
   socket.on('av', function (s) {
     var n = Date.now();
     if (n - p.at < 400) return;
@@ -196,6 +195,16 @@ io.on('connection', function (socket) {
     if (typeof s !== 'string' || !/^[0-9a-f]{64}$/.test(s) || /^0+$/.test(s)) return;
     p.a = s;
     socket.broadcast.emit('av', [id, s]);
+  });
+
+  // Manejo de Disparo integrado
+  socket.on('shoot', function (data) {
+    if (!p.w) return; // Si no tiene arma, ignora
+    var dx = data.x - monster.x, dy = data.y - monster.y;
+    if (dx * dx + dy * dy < 3600) { // Si el disparo cae cerca del monstruo (~60px)
+      monster.stun = 3; // Lo aturde 3 segundos
+    }
+    socket.broadcast.emit('shot', { id: id, x: data.x, y: data.y });
   });
 
   socket.on('disconnect', function () {
@@ -216,17 +225,15 @@ setInterval(function () {
   var id, p, wid, w, dx, dy;
   for (id in players) {
     p = players[id];
-    // recoger arma al tocarla (si es de otro tipo que la que ya lleva)
     for (wid in weps) {
       w = weps[wid]; dx = w.x - p.x; dy = w.y - p.y;
-      if (dx * dx + dy * dy < 100 && p.w !== w.t) {
+      if (dx * dx + dy * dy < 144 && p.w !== w.t) {
         p.w = w.t; delete weps[wid]; wc--;
         io.emit('w-', +wid);
         io.emit('pw', [+id, p.w]);
         break;
       }
     }
-    // el monstruo atrapa: vuelves al inicio y pierdes el arma
     if (monster.stun <= 0 && now > p.safe) {
       dx = p.x - monster.x; dy = p.y - monster.y;
       if (dx * dx + dy * dy < CATCH_DIST * CATCH_DIST) respawn(p, id, now);
@@ -244,4 +251,4 @@ setInterval(function () {
   io.volatile.emit('p', arr, Math.round(monster.x), Math.round(monster.y));
 }, TICK_MS);
 
-server.listen(PORT, function () { console.log('Backrooms en http://localhost:' + PORT); });
+server.listen(PORT, function () { console.log('Backrooms corriendo en puerto ' + PORT); });
